@@ -1,0 +1,22 @@
+konto_check_ruby - pure Ruby port of the C library konto_check
+
+Copyright (C) 2026 tickettoaster GmbH <https://tickettoaster.de>
+                   (Ruby port, LUT/Bundesbank file handling, self update,
+                   tests, documentation)
+Copyright (C) 2002-2023 Michael Plugge <konto_check@yahoo.com>
+                   (konto_check: check digit methods, IBAN rules, LUT file
+                   format, the KontoCheck module of the konto_check gem)
+
+This library is free software; you can redistribute it and/or modify it
+under the terms of the GNU Lesser General Public License as published by the
+Free Software Foundation; either version 2.1 of the License, or (at your
+option) any later version.
+
+This library is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License (file
+LICENSE) for more details.
+
+The bank data in data/ is published by the Deutsche Bundesbank
+(https://www.bundesbank.de); the table of IBAN rules was extracted from the
+LUT file of konto_check 6.15.

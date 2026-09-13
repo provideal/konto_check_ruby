@@ -1,0 +1,202 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Copyright (C) 2026 tickettoaster GmbH <https://tickettoaster.de>.
+# Part of konto_check_ruby, a Ruby port of konto_check (Copyright (C)
+# 2002-2023 Michael Plugge); licensed under the GNU Lesser General Public
+# License, version 2.1 or later, see the file LICENSE.
+
+# Command line interface of konto_check_ruby.
+#
+#   konto_check_ruby [-d DATAFILE] COMMAND ARGS...
+#
+# DATAFILE is a LUT file (blz.lut2f) or a Bundesbank bank code file (TXT,
+# CSV or XML); "current" uses the current Bundesbank file from the local
+# cache (downloaded on demand, see the update command). Without -d the LUT
+# file bundled with the gem is used.
+
+require "optparse"
+require_relative "../lib/konto_check_ruby"
+
+options = { data: nil, level: 9 }
+parser = OptionParser.new do |o|
+  o.banner = <<~BANNER
+    Usage: konto_check_ruby [options] COMMAND [ARGS]
+
+    Commands:
+      check BLZ KTO           check an account number (with IBAN rules: check-regel)
+      check-pz METHODE KTO    check an account number with a given check method (e.g. 00, 13a)
+      iban IBAN               validate an IBAN
+      iban-gen BLZ KTO        generate the IBAN and BIC for an account
+      bank BLZ [FILIALE]      show the bank data of a BLZ
+      search TEXT             search banks (e.g. "Sparkasse Köln", "50667@plz", "COBADEFF@bic")
+      generate-lut IN OUT     generate a LUT file from a Bundesbank file
+      dump LUT                show the directory of a LUT file
+      info [LUT]              show the info block(s) of a LUT file / the loaded data
+      update [LUTFILE]        download the current Bundesbank file into the cache
+                              (and optionally write a LUT file from it)
+      version
+
+    Options:
+  BANNER
+  o.on("-d", "--data FILE", "LUT file, Bundesbank file (TXT/CSV/XML) or 'current'; default: the bundled blz.lut2f") { |v| options[:data] = v }
+  o.on("--cache DIR", "cache directory for 'current'/update (default #{KontoCheckRuby::Update.cache_dir})") { |v| options[:cache] = v }
+  o.on("--force", "update: download even if the file is cached") { options[:force] = true }
+  o.on("-l", "--level N", Integer, "init level for LUT files (0..9, default 9)") { |v| options[:level] = v }
+  o.on("-g", "--gueltigkeit RANGE", "validity JJJJMMTT-JJJJMMTT (generate-lut, Bundesbank files)") { |v| options[:gueltigkeit] = v }
+  o.on("-h", "--help") do
+    puts o
+    exit
+  end
+end
+parser.parse!
+
+command = ARGV.shift
+if command.nil?
+  puts parser
+  exit 1
+end
+
+engine = KontoCheckRuby::Engine.new
+
+def load_data(engine, options)
+  file = options[:data]
+  code = if file == "current"
+           c = engine.load_current(dir: options[:cache] || KontoCheckRuby::Update.cache_dir)
+           warn "download failed (#{engine.last_update_error}), using #{engine.current_lutfile_name[0]}" if engine.last_update_error
+           c
+         elsif file && file =~ /\.(txt|csv|xml)\z/i
+           engine.load_blz_file(file, gueltigkeit: options[:gueltigkeit])
+         else
+           engine.init(file, options[:level])
+         end
+  return if code > 0 || code == KontoCheckRuby::LUT2_PARTIAL_OK
+  warn "could not load bank data#{file ? " from #{file}" : ''}: #{engine.retval2txt_short(code)} (#{engine.retval2txt(code)})"
+  exit 2
+end
+
+def status(engine, code)
+  "#{code} #{engine.retval2txt_short(code)}: #{engine.retval2txt(code)}"
+end
+
+case command
+when "check", "check-regel"
+  load_data(engine, options)
+  blz, kto = ARGV
+  abort "usage: check BLZ KTO" unless blz && kto
+  code = command == "check" ? engine.kto_check_blz(blz, kto) : engine.kto_check_regel(blz, kto)
+  puts status(engine, code)
+  exit(code > 0 ? 0 : 1)
+when "check-pz"
+  pz, kto, blz = ARGV
+  abort "usage: check-pz METHODE KTO [BLZ]" unless pz && kto
+  code = engine.kto_check_pz(pz, kto, blz)
+  puts status(engine, code)
+  exit(code > 0 ? 0 : 1)
+when "iban"
+  load_data(engine, options)
+  iban = ARGV[0] or abort "usage: iban IBAN"
+  code, kc = engine.iban_check(iban)
+  puts "IBAN:  #{status(engine, code)}"
+  puts "Konto: #{status(engine, kc)}"
+  if code > 0 && iban.gsub(/\s/, "")[0, 2].casecmp("DE").zero? && engine.initialized?
+    bic, ret, blz, kto = engine.iban2bic(iban)
+    puts "BLZ #{blz}, Konto #{kto}, BIC #{bic} (#{engine.retval2txt_short(ret)})"
+    name, r = engine.lut_name(blz)
+    puts "Bank: #{name}, #{engine.lut_ort(blz)[0]}" if r == KontoCheckRuby::OK
+  end
+  exit(code > 0 ? 0 : 1)
+when "iban-gen"
+  load_data(engine, options)
+  blz, kto = ARGV
+  abort "usage: iban-gen BLZ KTO" unless blz && kto
+  ret, iban, bic, blz2, kto2 = engine.iban_bic_gen(blz, kto)
+  puts status(engine, ret)
+  if iban
+    puts "IBAN: #{iban}"
+    puts "BIC:  #{bic}"
+    puts "verwendete BLZ/Konto: #{blz2} / #{kto2}" if blz2 != blz || kto2 != kto.rjust(10, "0")
+  end
+  exit(ret > 0 ? 0 : 1)
+when "bank"
+  load_data(engine, options)
+  blz = ARGV[0] or abort "usage: bank BLZ [FILIALE]"
+  fil = (ARGV[1] || 0).to_i
+  m = engine.lut_multiple(blz)
+  if m[:retval] <= 0 && m[:retval] != KontoCheckRuby::LUT2_PARTIAL_OK
+    puts status(engine, m[:retval])
+    exit 1
+  end
+  if fil >= m[:cnt]
+    puts status(engine, KontoCheckRuby::LUT2_INDEX_OUT_OF_RANGE)
+    exit 1
+  end
+  f = ->(k) { m[k] ? m[k][fil] : "-" }
+  bic, bret = engine.lut_bic(blz, fil)
+  puts "BLZ:             #{m[:blz]} (#{m[:cnt]} Stelle#{m[:cnt] == 1 ? '' : 'n'}, Filiale #{fil})"
+  puts "Name:            #{f.call(:name)}"
+  puts "Kurzname:        #{f.call(:name_kurz)}"
+  puts "PLZ / Ort:       #{f.call(:plz)} #{f.call(:ort)}"
+  puts "BIC:             #{bic} (#{engine.retval2txt_short(bret)})"
+  puts "Prüfziffer:      #{m[:pz] ? KontoCheckRuby::BlzFile.pz_to_string(m[:pz]) : '-'}"
+  puts "PAN:             #{f.call(:pan)}"
+  puts "Datensatz-Nr.:   #{f.call(:nr)}"
+  puts "Änderung:        #{f.call(:aenderung)}"
+  puts "Löschung:        #{f.call(:loeschung)}"
+  puts "Nachfolge-BLZ:   #{f.call(:nachfolge_blz)}"
+  r = f.call(:iban_regel)
+  puts "IBAN-Regel:      #{r.is_a?(Integer) ? format('%04d.%02d', r / 100, r % 100) : r}"
+when "search"
+  load_data(engine, options)
+  text = ARGV.join(" ")
+  abort "usage: search TEXT" if text.empty?
+  code, pairs = engine.lut_suche_multiple(text, true)
+  if code < 0 || pairs.empty?
+    puts status(engine, code == KontoCheckRuby::OK ? KontoCheckRuby::KEY_NOT_FOUND : code)
+    exit 1
+  end
+  pairs.each do |blz, zw|
+    name, = engine.lut_name(blz.to_s, zw)
+    ort, = engine.lut_ort(blz.to_s, zw)
+    bic, = engine.lut_bic_int(blz.to_s, zw)
+    puts format("%08d %-11s %-40s %s", blz, bic.to_s.strip, name.to_s[0, 40], ort)
+  end
+  puts "#{pairs.size} Treffer#{code == KontoCheckRuby::SOME_KEYS_NOT_FOUND ? ' (nicht alle Suchbegriffe gefunden)' : ''}"
+when "generate-lut"
+  input, output = ARGV
+  abort "usage: generate-lut INPUT OUTPUT" unless input && output
+  code = KontoCheckRuby::BlzFile.generate_lut(input, output, gueltigkeit: options[:gueltigkeit], felder: 9, filialen: true,
+                                                             user_info: "generiert von konto_check_ruby #{KontoCheckRuby::VERSION}")
+  puts status(engine, code)
+  exit(code > 0 ? 0 : 1)
+when "dump"
+  lut = ARGV[0] or abort "usage: dump LUT"
+  code, dump = KontoCheckRuby::LutFile.dump(lut)
+  puts(code == KontoCheckRuby::OK ? dump : status(engine, code))
+when "info"
+  if ARGV[0]
+    code, i1, i2, v1, v2 = engine.lut_info(ARGV[0])
+    puts status(engine, code)
+    puts "\n1. Datensatz (#{engine.retval2txt_short(v1)}):\n#{i1}" if i1
+    puts "\n2. Datensatz (#{engine.retval2txt_short(v2)}):\n#{i2}" if i2
+  else
+    load_data(engine, options)
+    puts engine.lut_info[1]
+    puts "Gültigkeit: #{engine.retval2txt_short(engine.lut_valid)}"
+  end
+when "update"
+  begin
+    r = KontoCheckRuby::Update.update(dir: options[:cache] || KontoCheckRuby::Update.cache_dir, lut: ARGV[0], force: options[:force])
+    puts "#{r.status == :downloaded ? 'downloaded' : 'already cached'}: #{r.path} (gültig #{r.valid_from}-#{r.valid_to})"
+    puts "LUT file written: #{r.lut}" if r.lut
+  rescue KontoCheckRuby::Update::Error => e
+    warn e.message
+    exit 2
+  end
+when "version"
+  puts engine.version
+else
+  warn "unknown command #{command}"
+  puts parser
+  exit 1
+end
